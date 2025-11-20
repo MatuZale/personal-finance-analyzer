@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+#Python
+__pycache__/
+*.pyc
+
+#Enviroments
+venv/
+.env/
+*.egg-info/
+
+#Streamlit cache
+.streamlit/
+
+#IDE
+.idea/
+.vscode/
+
+#Data
+data/raw/*
+data/raw/
+*.csv
+
+#Reports
+reposts/

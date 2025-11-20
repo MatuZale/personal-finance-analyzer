@@ -1,0 +1,23 @@
+{
+    "Groceries": [
+        "biedronka", "lidl", "carrefour", "zabka", "żabka", "kaufland", "auchan", "tesco"
+    ],
+    "Restaurants": [
+        "mc", "kfc", "pizza", "restauracja", "ubereats", "bolt food"
+    ],
+    "Transport": [
+        "uber", "bolt", "pkp", "zkmgdynia", "ztm", " komunikacja"
+    ],
+    "Salary": [
+        "wynagrodzenie", "salary", "pensja", "umowa o prace", "przelew od pracodawcy"
+    ],
+    "Rent": [
+        "czynsz", "mieszkanie", "wynajem", "rent"
+    ],
+    "Utilities": [
+        "energa", "pge", "gaz", "energia", "internet", "vodafone", "orange", "t-mobile"
+    ],
+    "Shopping": [
+        "allegro", "zalando", "amazon", "eshop"
+    ]
+}
