@@ -16,6 +16,8 @@ from .visuals import (
     plot_monthly_expenses_by_category,
     plot_top_expenses,
 )
+from .recurring import find_recurring_transactions
+
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
@@ -23,6 +25,21 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     rules_path = Path(args.rules)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    rules_default = Path("config/categories_rules.json")
+    rules_path_str = st.sidebar.text_input(
+        "Category rules JSON path",
+        value=str(rules_default),
+    )
+    rules_path = Path(rules_path_str)
+
+    overrides_default = Path("config/manual_overrides.csv")
+    overrides_path_str = st.sidebar.text_input(
+        "Manual overrides CSV path",
+        value=str(overrides_default),
+    )
+    manual_overrides_path = Path(overrides_path_str)
+    
 
     print(f"[INFO] Loading: {csv_path}")
     df_raw = load_transactions(csv_path) # type: ignore
@@ -63,6 +80,27 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     fig3.savefig(out_dir / "top_expenses.png", dpi=200)
 
     print(f"[INFO] Plots saved in: {out_dir}")
+    
+        # --- Recurring payments (subscriptions) ---
+    recurring = find_recurring_transactions(df_cat)
+
+    print("\n=== Recurring payments (heuristic subscriptions) ===")
+    if recurring.empty:
+        print("No recurring patterns detected with current settings.")
+    else:
+        # Show only a few key columns in CLI
+        print(
+            recurring[
+                [
+                    "example_description",
+                    "category",
+                    "n_payments",
+                    "avg_amount",
+                    "mean_interval_days",
+                ]
+            ].head(20)
+        )
+
 
 
 def main():

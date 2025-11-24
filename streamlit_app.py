@@ -9,7 +9,6 @@ import pandas as pd
 
 from finance_analyzer.loader import load_transactions
 from finance_analyzer.cleaner import clean_transactions
-from finance_analyzer.categorizer import load_category_rules, categorize_transactions
 from finance_analyzer.analytics import (
     monthly_income_expense,
     monthly_category_breakdown,
@@ -20,38 +19,74 @@ from finance_analyzer.visuals import (
     plot_monthly_expenses_by_category,
     plot_top_expenses,
 )
+from finance_analyzer.recurring import find_recurring_transactions
+from finance_analyzer.categorizer import (
+    load_category_rules,
+    categorize_transactions,
+    load_manual_overrides,
+    apply_manual_overrides,
+)
 
 
 # ---------- HELPER: pipeline ----------
 
-def run_pipeline_from_df(df_raw: pd.DataFrame, rules_path: Path) -> pd.DataFrame:
-    """Run cleaning + categorization on a raw dataframe."""
+def read_uploaded_csv(uploaded_file) -> pd.DataFrame:
+    """
+    Robust reader for Streamlit UploadedFile.
+    Tries multiple encodings commonly used in PL bank exports.
+    """
+    raw = uploaded_file.read()  # bytes
+
+    # Try several encodings
+    encodings_to_try = ["utf-8-sig", "cp1250", "iso-8859-2", "latin1"]
+
+    last_error = None
+    for enc in encodings_to_try:
+        try:
+            buffer = io.StringIO(raw.decode(enc))
+            df = pd.read_csv(buffer, sep=None, engine="python")
+            st.info(f"Successfully loaded with encoding: {enc}")
+            return df
+        except UnicodeDecodeError as e:
+            last_error = e
+            continue
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise RuntimeError(f"Could not decode CSV with tried encodings: {encodings_to_try}. Last error: {last_error}")
+
+
+def run_pipeline_from_df(
+    df_raw: pd.DataFrame,
+    rules_path: Path,
+    overrides_path: Path,
+) -> pd.DataFrame:
+    """Run cleaning + categorization (+ manual overrides) on a raw dataframe."""
     df_clean = clean_transactions(df_raw)
     rules = load_category_rules(rules_path)
+    overrides = load_manual_overrides(overrides_path)
+
     df_cat = categorize_transactions(df_clean, rules)
+    df_cat = apply_manual_overrides(df_cat, overrides)
     return df_cat
 
 
-def run_pipeline_from_file(uploaded_file, rules_path: Path) -> pd.DataFrame:
+def run_pipeline_from_file(
+    uploaded_file,
+    rules_path: Path,
+    overrides_path: Path,
+) -> pd.DataFrame:
     """
     uploaded_file is a Streamlit UploadedFile or None.
-    Uses same loader as CLI for CSV on disk, but for upload we read bytes.
     """
     if uploaded_file is None:
         return None
 
-    # Option 1: if your loader can handle file-like objects, you could adapt it.
-    # Here we'll just read with pandas directly and then reuse cleaner + categorizer.
-
-    # IMPORTANT: we assume same encoding as before
-    df_raw = pd.read_csv(
-        uploaded_file,
-        sep=None,
-        engine="python",
-        encoding="cp1250",
-    )
-    df_cat = run_pipeline_from_df(df_raw, rules_path)
+    df_raw = read_uploaded_csv(uploaded_file)
+    df_cat = run_pipeline_from_df(df_raw, rules_path, overrides_path)
     return df_cat
+
 
 
 # ---------- STREAMLIT APP ----------
@@ -71,12 +106,20 @@ def main():
     # --- SIDEBAR ---
     st.sidebar.header("Settings")
 
+    # Paths for rules + manual overrides
     rules_default = Path("config/categories_rules.json")
     rules_path_str = st.sidebar.text_input(
         "Category rules JSON path",
         value=str(rules_default),
     )
     rules_path = Path(rules_path_str)
+
+    overrides_default = Path("config/manual_overrides.csv")
+    overrides_path_str = st.sidebar.text_input(
+        "Manual overrides CSV path",
+        value=str(overrides_default),
+    )
+    manual_overrides_path = Path(overrides_path_str)
 
     # File uploader
     uploaded_file = st.sidebar.file_uploader(
@@ -92,6 +135,7 @@ def main():
 
     run_button = st.sidebar.button("Run analysis")
 
+    # --- EARLY RETURNS / VALIDATION ---
     if not run_button:
         st.info("Upload a file and click **Run analysis** to start.")
         return
@@ -107,7 +151,7 @@ def main():
     # --- PIPELINE EXECUTION ---
     with st.spinner("Processing file..."):
         try:
-            df_cat = run_pipeline_from_file(uploaded_file, rules_path)
+            df_cat = run_pipeline_from_file(uploaded_file, rules_path, manual_overrides_path)
         except Exception as e:
             st.error(f"Error while processing file: {e}")
             return
@@ -118,6 +162,7 @@ def main():
 
     # --- FILTERING ---
     df_view = df_cat.copy()
+
     if year_filter:
         try:
             y = int(year_filter)
@@ -154,6 +199,7 @@ def main():
     summary = monthly_income_expense(df_view)
     cat_pivot = monthly_category_breakdown(df_view)
     topn = top_expenses(df_view, n=top_n)
+    recurring = find_recurring_transactions(df_view)
 
     st.subheader("Monthly income / expenses summary")
     st.dataframe(summary)
@@ -163,6 +209,130 @@ def main():
 
     st.subheader(f"Top {top_n} expenses")
     st.dataframe(topn[["date", "description", "amount", "category"]])
+
+    # --- RECURRING PAYMENTS ---
+    st.subheader("📆 Recurring payments (subscriptions, rent, etc.)")
+
+    if recurring.empty:
+        st.info(
+            "No clear recurring patterns detected with current settings. "
+            "Try using a longer date range or adjust the detection heuristics."
+        )
+    else:
+        st.dataframe(
+            recurring[
+                [
+                    "example_description",
+                    "category",
+                    "n_payments",
+                    "avg_amount",
+                    "mean_interval_days",
+                    "first_date",
+                    "last_date",
+                ]
+            ]
+        )
+
+    # ===================== CATEGORY EDITOR ===================== #
+    st.markdown("## 🧩 Interactive category editor (manual overrides)")
+
+    with st.expander("Edit categories for repeating descriptions", expanded=False):
+        # Load current overrides into session state (so we can modify them)
+        if "overrides_df" not in st.session_state:
+            st.session_state["overrides_df"] = load_manual_overrides(manual_overrides_path)
+
+        overrides_df = st.session_state["overrides_df"]
+
+        st.markdown("### Current manual overrides")
+        if overrides_df.empty:
+            st.write("No manual overrides defined yet.")
+        else:
+            st.dataframe(overrides_df)
+
+        # Focus on 'Uncategorized' descriptions in the current filtered view
+        uncat = df_view[df_view["category"] == "Uncategorized"].copy()
+
+        if uncat.empty:
+            st.success("No 'Uncategorized' transactions in the current view.")
+        else:
+            st.markdown("### Add or update an override")
+
+            grouped = (
+                uncat.groupby("description")
+                    .agg(
+                        n=("amount", "size"),
+                        total_amount=("amount", "sum"),
+                    )
+                    .reset_index()
+                    .sort_values("n", ascending=False)
+            )
+
+            st.caption(
+                "Pick a description that appears often and assign it a category. "
+                "The rule will match this text as a substring in future runs."
+            )
+
+            desc_options = grouped["description"].tolist()
+            chosen_desc = st.selectbox(
+                "Choose a description to override",
+                options=desc_options,
+                key="override_desc_select",
+            )
+
+            # Available categories from current data (except Uncategorized)
+            existing_cats = sorted(
+                [c for c in df_view["category"].dropna().unique() if c != "Uncategorized"]
+            )
+
+            chosen_existing = st.selectbox(
+                "Assign existing category",
+                options=["(none)"] + existing_cats,
+                key="override_existing_cat",
+            )
+            new_cat = st.text_input("Or type a new category", value="")
+
+            if chosen_existing != "(none)":
+                final_cat = chosen_existing
+            elif new_cat.strip():
+                final_cat = new_cat.strip()
+            else:
+                final_cat = None
+
+            if st.button("Add / update override"):
+                if final_cat is None:
+                    st.warning("Please choose an existing category or type a new one.")
+                else:
+                    substr = chosen_desc  # we use full description as substring pattern
+
+                    if overrides_df.empty:
+                        overrides_df = pd.DataFrame(
+                            [{"substring": substr, "category": final_cat}]
+                        )
+                    else:
+                        mask = overrides_df["substring"] == substr
+                        if mask.any():
+                            overrides_df.loc[mask, "category"] = final_cat
+                        else:
+                            overrides_df = pd.concat(
+                                [
+                                    overrides_df,
+                                    pd.DataFrame(
+                                        [{"substring": substr, "category": final_cat}]
+                                    ),
+                                ],
+                                ignore_index=True,
+                            )
+
+                    # Save to CSV
+                    try:
+                        overrides_df.to_csv(manual_overrides_path, index=False)
+                        st.session_state["overrides_df"] = overrides_df
+                        st.success(
+                            f"Saved override: '{substr}' → '{final_cat}'. "
+                            "Re-run analysis to apply it."
+                        )
+                    except Exception as e:
+                        st.error(f"Could not save overrides: {e}")
 
     # --- PLOTS ---
     st.markdown("## 📈 Visualizations")
@@ -191,4 +361,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
