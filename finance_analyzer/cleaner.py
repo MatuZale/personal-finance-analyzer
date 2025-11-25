@@ -1,5 +1,44 @@
 # finance_analyzer/cleaner.py
 import pandas as pd
+import re
+
+def extract_merchant_from_description(desc: str) -> str:
+    """
+    Try to extract a short, stable 'merchant' name from the full description.
+    Examples:
+      'BOLT.EU/O/250103 Warsaw POL' -> 'BOLT.EU'
+      'ŻABKA #2043 GDAŃSK'          -> 'ŻABKA'
+      'PAYPAL *MICROSOFT 3531436'   -> 'PAYPAL MICROSOFT'
+    """
+    if pd.isna(desc):
+        return ""
+
+    s = str(desc).strip()
+
+    # Normalize spaces
+    s = re.sub(r"\s+", " ", s)
+
+    # Remove long numeric chunks (IDs, invoice numbers, etc.)
+    s_no_nums = re.sub(r"\d{3,}", "", s)
+
+    # Split on common separators: space, slash, star, dash, etc.
+    tokens = re.split(r"[ /,*;:-]+", s_no_nums)
+    tokens = [t for t in tokens if t]  # drop empty
+
+    if not tokens:
+        return s.upper()
+
+    core_tokens = []
+    for t in tokens:
+        # skip tiny junk tokens
+        if len(t) < 2:
+            continue
+        core_tokens.append(t)
+        if len(core_tokens) >= 2:
+            break
+
+    merchant = " ".join(core_tokens) if core_tokens else tokens[0]
+    return merchant.upper()
 
 def parse_pl_number(col: pd.Series) -> pd.Series:
     """
@@ -55,6 +94,8 @@ def clean_transactions(df: pd.DataFrame) -> pd.DataFrame:
     desc_parts = [c for c in ["counterparty", "title", "details"] if c in df.columns]
     if desc_parts:
         df["description"] = df[desc_parts].astype(str).agg(" | ".join, axis=1)
+        df["merchant"] = df["description"].apply(extract_merchant_from_description)
+
     else:
         df["description"] = ""
 

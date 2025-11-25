@@ -180,9 +180,17 @@ def main():
 
     # --- MAIN PANELS ---
     st.subheader("Raw transactions (after cleaning & categorization)")
+
+    base_cols = ["date", "description", "amount", "balance", "currency", "category"]
+
+    # If merchant exists, insert it after date
+    display_cols = ["date"]
+    if "merchant" in df_view.columns:
+        display_cols.append("merchant")
+    display_cols += [c for c in base_cols if c not in ("date", "merchant")]
+
     st.dataframe(
-        df_view[["date", "description", "amount", "balance", "currency", "category"]]
-        .sort_values("date", ascending=False)
+        df_view[display_cols].sort_values("date", ascending=False)
     )
 
     # --- METRICS ---
@@ -251,6 +259,15 @@ def main():
 
         # Focus on 'Uncategorized' descriptions in the current filtered view
         uncat = df_view[df_view["category"] == "Uncategorized"].copy()
+        # Build suggestions based on already categorized transactions
+        known = df_view[df_view["category"] != "Uncategorized"].copy()
+        merchant_suggestions = {}
+        if not known.empty and "merchant" in known.columns:
+            merchant_suggestions = (
+                known.groupby("merchant")["category"]
+                .agg(lambda s: s.mode().iloc[0])
+                .to_dict()
+            )
 
         if uncat.empty:
             st.success("No 'Uncategorized' transactions in the current view.")
@@ -279,16 +296,41 @@ def main():
                 key="override_desc_select",
             )
 
+            # Find merchant for this description (use most common merchant if multiple)
+            chosen_merchant = None
+            if "merchant" in uncat.columns:
+                candidates = uncat.loc[
+                    uncat["description"] == chosen_desc, "merchant"
+                ]
+                if not candidates.empty:
+                    chosen_merchant = candidates.mode().iloc[0]
+
+            # Suggested category based on previous data for this merchant
+            suggested_cat = None
+            if chosen_merchant and chosen_merchant in merchant_suggestions:
+                suggested_cat = merchant_suggestions[chosen_merchant]
+                st.caption(
+                    f"Suggested category for merchant **{chosen_merchant}**: "
+                    f"**{suggested_cat}**"
+                )
+
             # Available categories from current data (except Uncategorized)
             existing_cats = sorted(
                 [c for c in df_view["category"].dropna().unique() if c != "Uncategorized"]
             )
 
+            # Default dropdown index
+            default_index = 0  # "(none)"
+            if suggested_cat and suggested_cat in existing_cats:
+                default_index = 1 + existing_cats.index(suggested_cat)
+
             chosen_existing = st.selectbox(
                 "Assign existing category",
                 options=["(none)"] + existing_cats,
+                index=default_index,
                 key="override_existing_cat",
             )
+
             new_cat = st.text_input("Or type a new category", value="")
 
             if chosen_existing != "(none)":
