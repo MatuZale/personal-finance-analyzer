@@ -3,7 +3,7 @@
 
 import io
 from pathlib import Path
-
+import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
 
@@ -13,18 +13,30 @@ from finance_analyzer.analytics import (
     monthly_income_expense,
     monthly_category_breakdown,
     top_expenses,
+    compute_monthly_cashflow,
+    forecast_cashflow_seasonal,
 )
 from finance_analyzer.visuals import (
     plot_monthly_income_expense,
     plot_monthly_expenses_by_category,
     plot_top_expenses,
 )
-from finance_analyzer.recurring import find_recurring_transactions
+from finance_analyzer.recurring import find_recurring_transactions, _normalize_description
+
 from finance_analyzer.categorizer import (
     load_category_rules,
     categorize_transactions,
     load_manual_overrides,
     apply_manual_overrides,
+)
+
+import warnings
+
+# Suppress specific pandas warnings in Streamlit app
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    module="pandas.core.reshape.concat",
 )
 
 
@@ -87,7 +99,96 @@ def run_pipeline_from_file(
     df_cat = run_pipeline_from_df(df_raw, rules_path, overrides_path)
     return df_cat
 
+def show_cashflow_forecast_tab(df: pd.DataFrame):
+    st.header("Forcast of monthly cashflow")
 
+    # 1. History
+    monthly = compute_monthly_cashflow(df)
+
+    # 2. Parameters from user
+    col1, col2 = st.columns(2)
+    with col1:
+        periods = st.slider("Number of months to forcast", 3, 24, 6, step=1)
+    with col2:
+        min_history = st.slider("Minimal number of months", 3, 24, 6, step=1)
+
+    # 3. Prognose
+    forecast = forecast_cashflow_seasonal(
+        monthly,
+        periods=periods,
+        min_history=min_history,
+    )
+
+    hist_plot = monthly.assign(kind="history")
+    fc_plot = forecast.assign(kind="forecast")
+
+    frames = [hist_plot, fc_plot]
+
+# Remove empty frames
+    clean_frames = []
+    for f in frames:
+        if f is None:
+            continue
+        if f.empty:
+            continue
+    # if all columns are NA
+        if f.dropna(how="all").empty:
+            continue
+        clean_frames.append(f)
+
+    if clean_frames:
+        combined = pd.concat(clean_frames, ignore_index=True)
+    else:
+        combined = pd.DataFrame(columns=["month", "income", "expense", "net", "kind"])
+
+    # 4. plot - net cashflow
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    # history
+    ax.bar(
+        hist_plot["month"],
+        hist_plot["net"],
+        width=20,
+        label="History",
+    )
+
+    # history (half-transparent)
+    ax.bar(
+        fc_plot["month"],
+        fc_plot["net"],
+        width=20,
+        alpha=0.6,
+        label="Forecast",
+        linestyle="--",
+    )
+
+    ax.set_title("Monthly net cashflow (history + forecast)")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Net amount")
+
+    ax.legend()
+
+    # dark-mode
+    fig.patch.set_facecolor("#0e1117")
+    ax.set_facecolor("#0e1117")
+    for spine in ax.spines.values():
+        spine.set_color("white")
+    ax.tick_params(colors="white")
+    ax.yaxis.label.set_color("white")
+    ax.xaxis.label.set_color("white")
+    ax.title.set_color("white")
+    legend = ax.legend()
+    for text in legend.get_texts():
+        text.set_color("white")
+
+    st.pyplot(fig)
+
+    st.subheader("Monthly data (historical + forecast)")
+    st.dataframe(
+    combined[["month", "income", "expense", "net", "kind"]]
+    .sort_values("month")
+    .reset_index(drop=True)
+    )
 
 # ---------- STREAMLIT APP ----------
 
@@ -97,7 +198,7 @@ def main():
         layout="wide",
     )
 
-    st.title("💸 Personal Finance Analyzer")
+    st.title("Personal Finance Analyzer")
     st.markdown(
         "Upload a bank CSV export, categorize transactions, "
         "and explore monthly spending, categories, and top expenses."
@@ -135,30 +236,40 @@ def main():
 
     run_button = st.sidebar.button("Run analysis")
 
-    # --- EARLY RETURNS / VALIDATION ---
-    if not run_button:
+    # --- PIPELINE EXECUTION (tylko gdy klikniesz przycisk) ---
+    if run_button:
+        if uploaded_file is None:
+            st.error("Please upload a CSV file.")
+            return
+
+        if not rules_path.exists():
+            st.error(f"Category rules file not found: {rules_path}")
+            return
+
+        with st.spinner("Processing file..."):
+            try:
+                df_cat = run_pipeline_from_file(
+                    uploaded_file, rules_path, manual_overrides_path
+                )
+            except Exception as e:
+                st.error(f"Error while processing file: {e}")
+                return
+
+        if df_cat is None or df_cat.empty:
+            st.warning("No transactions found after processing.")
+            return
+
+        # ZAPISZ wynik w session_state
+        st.session_state["df_cat"] = df_cat
+
+    # --- JEŚLI JESZCZE NIC NIE POLICZYLIŚMY ---
+    if "df_cat" not in st.session_state:
         st.info("Upload a file and click **Run analysis** to start.")
         return
 
-    if uploaded_file is None:
-        st.error("Please upload a CSV file.")
-        return
+    # ODTĄD ZAWSZE KORZYSTAMY Z ZAPISANEGO DF
+    df_cat = st.session_state["df_cat"]
 
-    if not rules_path.exists():
-        st.error(f"Category rules file not found: {rules_path}")
-        return
-
-    # --- PIPELINE EXECUTION ---
-    with st.spinner("Processing file..."):
-        try:
-            df_cat = run_pipeline_from_file(uploaded_file, rules_path, manual_overrides_path)
-        except Exception as e:
-            st.error(f"Error while processing file: {e}")
-            return
-
-    if df_cat is None or df_cat.empty:
-        st.warning("No transactions found after processing.")
-        return
 
     # --- FILTERING ---
     df_view = df_cat.copy()
@@ -204,22 +315,61 @@ def main():
     col3.metric("Net", f"{net:,.2f}")
 
     # --- ANALYTICS ---
+
+        # --- ANALYTICS ---
     summary = monthly_income_expense(df_view)
     cat_pivot = monthly_category_breakdown(df_view)
     topn = top_expenses(df_view, n=top_n)
     recurring = find_recurring_transactions(df_view)
 
-    st.subheader("Monthly income / expenses summary")
-    st.dataframe(summary)
+    # Przygotuj dane pojedynczych płatności do podglądu cykli
+    expenses_with_norm = df_view[df_view["amount"] < 0].copy()
+    if not expenses_with_norm.empty:
+        expenses_with_norm["desc_norm"] = _normalize_description(
+            expenses_with_norm["description"]
+        )
 
-    st.subheader("Monthly expenses by category")
-    st.dataframe(cat_pivot)
+    # --- TABS ---
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Summary", "Category", "Plots", "Forecast cashflow"]
+    )
 
-    st.subheader(f"Top {top_n} expenses")
-    st.dataframe(topn[["date", "description", "amount", "category"]])
+    with tab1:
+        st.subheader("Monthly income / expenses summary")
+        st.dataframe(summary)
+
+        st.subheader(f"Top {top_n} expenses")
+        st.dataframe(topn[["date", "description", "amount", "category"]])
+
+    with tab2:
+        st.subheader("Monthly expenses by category")
+        st.dataframe(cat_pivot)
+
+    with tab3:
+        st.markdown("Visualizations")
+        st.subheader("Wykresy")
+
+        if df_view.empty:
+            st.info("Brak danych do wykresów – zmień filtry u góry.")
+        else:
+            # 1) Monthly income / expense
+            fig1, _ = plot_monthly_income_expense(summary)
+            st.pyplot(fig1)
+
+            # 2) Monthly expenses by category
+            fig2, _ = plot_monthly_expenses_by_category(cat_pivot)
+            st.pyplot(fig2)
+
+            # 3) Top N expenses
+            fig3, _ = plot_top_expenses(topn)
+            st.pyplot(fig3)
+
+    with tab4:
+        # NOWA ZAKŁADKA — prognoza cashflow
+        show_cashflow_forecast_tab(df_view)
 
     # --- RECURRING PAYMENTS ---
-    st.subheader("📆 Recurring payments (subscriptions, rent, etc.)")
+    st.subheader("Recurring payments (subscriptions, rent, etc.)")
 
     if recurring.empty:
         st.info(
@@ -227,6 +377,8 @@ def main():
             "Try using a longer date range or adjust the detection heuristics."
         )
     else:
+        # Table summary
+        st.markdown("### Summary of detected recurring payments")
         st.dataframe(
             recurring[
                 [
@@ -240,6 +392,42 @@ def main():
                 ]
             ]
         )
+
+        # Details per series
+        st.markdown("### Detailed transactions for each recurring series")
+
+        if expenses_with_norm.empty:
+            st.info("No expense transactions available to show details.")
+        else:
+            for _, row in recurring.iterrows():
+                desc_norm = row["desc_norm"]
+
+                # All transactions in this series
+                series_tx = (
+                    expenses_with_norm[expenses_with_norm["desc_norm"] == desc_norm]
+                    .sort_values("date")
+                    .reset_index(drop=True)
+                )
+
+                # Header with example description + n payments + avg amount
+                title = (
+                    f"{row['example_description']} "
+                    f"({row['n_payments']}×, "
+                    f"avg {row['avg_amount']:.2f})"
+                )
+
+                with st.expander(title, expanded=False):
+                    st.dataframe(
+                        series_tx[
+                            [
+                                "date",
+                                "description",
+                                "amount",
+                                "category",
+                            ]
+                        ]
+                    )
+
 
     # ===================== CATEGORY EDITOR ===================== #
     st.markdown("## 🧩 Interactive category editor (manual overrides)")
@@ -375,21 +563,6 @@ def main():
                         )
                     except Exception as e:
                         st.error(f"Could not save overrides: {e}")
-
-    # --- PLOTS ---
-    st.markdown("## 📈 Visualizations")
-
-    # 1) Monthly income / expenses / net
-    fig1, _ = plot_monthly_income_expense(summary)
-    st.pyplot(fig1)
-
-    # 2) Monthly expenses by category
-    fig2, _ = plot_monthly_expenses_by_category(cat_pivot)
-    st.pyplot(fig2)
-
-    # 3) Top N expenses
-    fig3, _ = plot_top_expenses(topn)
-    st.pyplot(fig3)
 
     # Optional: download cleaned & categorized CSV
     csv_bytes = df_view.to_csv(index=False).encode("utf-8")

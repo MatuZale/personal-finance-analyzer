@@ -100,9 +100,9 @@ def clean_transactions(df: pd.DataFrame) -> pd.DataFrame:
         df["description"] = ""
 
     # 3) Dates (Polish bank exports are usually day-first)
-    df["date"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
+    df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d", errors="coerce")
     if "posting_date" in df.columns:
-        df["posting_date"] = pd.to_datetime(df["posting_date"], dayfirst=True, errors="coerce")
+        df["posting_date"] = pd.to_datetime(df["posting_date"], format="%Y-%m-%d", errors="coerce")
 
     # 4) Numeric columns
     if "amount_raw" in df.columns:
