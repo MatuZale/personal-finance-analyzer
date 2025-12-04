@@ -5,7 +5,9 @@ matplotlib.use("Agg")  # safe for Streamlit / headless
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import FuncFormatter
-
+import plotly.graph_objects as go
+import streamlit as st
+import pandas as pd
 
 # ---------- COMMON DARK STYLE HELPERS ----------
 
@@ -232,3 +234,293 @@ def plot_top_expenses(topn_df):
 
     fig.tight_layout()
     return fig, ax
+
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+def detailed_time_series_analysis(df: pd.DataFrame) -> None:
+    """
+    Interaktywna analiza czasowa:
+    - wybór metryki (saldo, netto, income, expense, saldo skumulowane)
+    - wybór zakresu dat (ROI)
+    - statystyki dopasowane do typu metryki
+    - regresja wielomianowa (1–6 stopień) i trend na wykresie
+    """
+    st.subheader("📈 Detailed time series analysis")
+
+    df = df.copy()
+    df = df.sort_values("date")
+
+    if "date" not in df.columns:
+        st.error("Brak kolumny 'date' w DataFrame.")
+        return
+
+    # --------- PRZYGOTOWANIE DANYCH BAZOWYCH ---------
+    # Saldo dzienne – ostatnie saldo danego dnia
+    daily_balance = None
+    if "balance" in df.columns:
+        daily_balance = (
+            df.sort_values("date")
+              .groupby("date", as_index=False)["balance"]
+              .last()
+        )
+
+    # Dzienny przepływ netto + income + expense
+    daily_net = (
+        df.groupby("date", as_index=False)["amount"]
+          .sum()
+          .rename(columns={"amount": "net"})
+    )
+
+    # Income (tylko dodatnie) i expense (tylko ujemne)
+    if "type" in df.columns:
+        df_income = (
+            df[df["type"] == "income"]
+            .groupby("date", as_index=False)["amount"]
+            .sum()
+            .rename(columns={"amount": "income"})
+        )
+        df_expense = (
+            df[df["type"] == "expense"]
+            .groupby("date", as_index=False)["amount"]
+            .sum()
+            .rename(columns={"amount": "expense"})
+        )
+    else:
+        # fallback gdy brak kolumny "type"
+        df_income = (
+            df[df["amount"] > 0]
+            .groupby("date", as_index=False)["amount"]
+            .sum()
+            .rename(columns={"amount": "income"})
+        )
+        df_expense = (
+            df[df["amount"] < 0]
+            .groupby("date", as_index=False)["amount"]
+            .sum()
+            .rename(columns={"amount": "expense"})
+        )
+
+    # Sklej wszystko w jedną ramkę dzienną
+    daily = daily_net.set_index("date")
+    daily = daily.join(df_income.set_index("date"), how="left")
+    daily = daily.join(df_expense.set_index("date"), how="left")
+    daily = daily.fillna(0.0)
+    daily = daily.reset_index()
+
+    # Dodatkowo: dzienny wydatek jako wartość dodatnia
+    daily["expense_abs"] = -daily["expense"]  # bo expense jest ujemny
+
+    # Saldo skumulowane (cumsum przepływu netto)
+    daily["cum_net"] = daily["net"].cumsum()
+
+    # --------- WYBÓR METRYKI ---------
+    metric_options = [
+        "Saldo po transakcji (balance)",
+        "Dzienny przepływ netto (suma amount z dnia)",
+        "Dzienny dochód (tylko income)",
+        "Dzienny wydatek (tylko expense, wartości dodatnie)",
+        "Saldo skumulowane (cumsum przepływu netto)",
+    ]
+
+    metric = st.selectbox(
+        "Wybierz co analizujemy:",
+        metric_options,
+    )
+
+    # Dobierz serię do analizy
+    if metric == "Saldo po transakcji (balance)":
+        if daily_balance is None:
+            st.error("Brak kolumny 'balance' dla tej metryki.")
+            return
+        series = daily_balance.rename(columns={"balance": "value"})
+        y_label = "Saldo"
+        is_level_series = True  # poziom w czasie (saldo)
+    elif metric == "Dzienny przepływ netto (suma amount z dnia)":
+        series = daily[["date", "net"]].rename(columns={"net": "value"})
+        y_label = "Dzienny przepływ netto"
+        is_level_series = False  # to jest przepływ
+    elif metric == "Dzienny dochód (tylko income)":
+        series = daily[["date", "income"]].rename(columns={"income": "value"})
+        y_label = "Dzienny dochód"
+        is_level_series = False
+    elif metric == "Dzienny wydatek (tylko expense, wartości dodatnie)":
+        series = daily[["date", "expense_abs"]].rename(columns={"expense_abs": "value"})
+        y_label = "Dzienny wydatek (>= 0)"
+        is_level_series = False
+    else:  # "Saldo skumulowane (cumsum przepływu netto)"
+        series = daily[["date", "cum_net"]].rename(columns={"cum_net": "value"})
+        y_label = "Saldo skumulowane"
+        is_level_series = True
+
+    if series.empty:
+        st.warning("Brak danych do analizy.")
+        return
+
+    # --------- REGION OF INTEREST (ROI) ---------
+    date_min = series["date"].min()
+    date_max = series["date"].max()
+
+    st.markdown("### 🕒 Region of interest (ROI)")
+    start_date, end_date = st.slider(
+    "Wybierz zakres dat:",
+    min_value=date_min.to_pydatetime(),
+    max_value=date_max.to_pydatetime(),
+    value=(date_min.to_pydatetime(), date_max.to_pydatetime()),
+    format="DD/MM/YYYY",
+    key="roi_date_range_slider",
+    )
+
+    mask = (series["date"] >= pd.to_datetime(start_date)) & (
+        series["date"] <= pd.to_datetime(end_date)
+    )
+    roi = series.loc[mask].copy()
+
+    if roi.empty:
+        st.warning("Wybrany zakres dat nie zawiera danych.")
+        return
+
+    # --------- STATYSTYKI W ROI ---------
+    st.markdown("### 📊 Podstawowe statystyki w ROI")
+
+    if is_level_series:
+        # dla serii poziomów (saldo itp.) ma sens: początek, koniec, zmiana, min, max
+        start_val = roi["value"].iloc[0]
+        end_val = roi["value"].iloc[-1]
+        delta = end_val - start_val
+        vmin = roi["value"].min()
+        vmax = roi["value"].max()
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Saldo na początku", f"{start_val:,.2f}")
+        with col2:
+            st.metric("Saldo na końcu", f"{end_val:,.2f}")
+        with col3:
+            st.metric("Zmiana salda", f"{delta:,.2f}")
+        with col4:
+            st.metric("Min", f"{vmin:,.2f}")
+        with col5:
+            st.metric("Max", f"{vmax:,.2f}")
+    else:
+        # dla serii przepływów: suma, średnia, min, max
+        total = roi["value"].sum()
+        mean = roi["value"].mean()
+        vmin = roi["value"].min()
+        vmax = roi["value"].max()
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Suma (netto w ROI)", f"{total:,.2f}")
+        with col2:
+            st.metric("Średnia dziennie", f"{mean:,.2f}")
+        with col3:
+            st.metric("Min", f"{vmin:,.2f}")
+        with col4:
+            st.metric("Max", f"{vmax:,.2f}")
+
+    # --------- REGRESJA WIELOMIANOWA (1–6) ---------
+    st.markdown("### 📐 Trend (regresja wielomianowa)")
+
+    # pozwól na większy stopień, ale max 6 (i tak trzeba uważać na overfitting)
+    degree = st.slider(
+    "Stopień wielomianu",
+    min_value=1,
+    max_value=6,
+    value=2,
+    help="Uwaga: wysokie stopnie łatwo się przeuczają – patrz na wykres krytycznie.",
+    key="poly_degree_slider",
+    )
+
+
+    trend_df = None
+    if len(roi) >= degree + 1:
+        # Oś X jako dni od początku ROI (żeby liczby były małe)
+        x = (roi["date"] - roi["date"].min()).dt.total_seconds() / 86400.0
+        y = roi["value"].values
+
+        coeffs = np.polyfit(x, y, degree)
+        poly = np.poly1d(coeffs)
+
+        x_fit = np.linspace(x.min(), x.max(), 200)
+        y_fit = poly(x_fit)
+
+        trend_df = pd.DataFrame(
+            {
+                "date": roi["date"].min() + pd.to_timedelta(x_fit, unit="D"),
+                "value": y_fit,
+            }
+        )
+
+        # Info o kierunku trendu (tylko dla 1 stopnia)
+        if degree == 1:
+            slope_per_day = coeffs[0]
+            st.info(f"Slope (kierunek trendu) ≈ {slope_per_day:.4f} jednostek / dzień")
+    else:
+        st.warning(
+            "Za mało punktów w ROI, aby dopasować wielomian tego stopnia."
+        )
+
+    # --------- WYKRES (Plotly, dark mode) ---------
+    st.markdown("### 🔍 Wykres z wyróżnionym ROI i trendem")
+
+    fig = go.Figure()
+
+    # Cała seria (lekko przygaszona)
+    fig.add_trace(
+        go.Scatter(
+            x=series["date"],
+            y=series["value"],
+            mode="lines",
+            name="Cały zakres",
+            opacity=0.3,
+        )
+    )
+
+    # ROI
+    fig.add_trace(
+        go.Scatter(
+            x=roi["date"],
+            y=roi["value"],
+            mode="lines+markers",
+            name="ROI",
+        )
+    )
+
+    # Trend
+    if trend_df is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=trend_df["date"],
+                y=trend_df["value"],
+                mode="lines",
+                name=f"Trend (poly deg={degree})",
+            )
+        )
+
+    fig.update_layout(
+        template="plotly_dark",
+        xaxis_title="Data",
+        yaxis_title=y_label,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=40, r=20, t=40, b=40),
+    )
+
+    fig.update_xaxes(rangeslider_visible=True)
+    st.plotly_chart(fig, width="stretch")
+
+    # --------- Histogram dla metryk przepływów ---------
+    if not is_level_series:
+        with st.expander("📦 Histogram wartości w ROI"):
+            hist_fig = go.Figure()
+            hist_fig.add_trace(go.Histogram(x=roi["value"], nbinsx=30, name="ROI values"))
+            hist_fig.update_layout(
+                template="plotly_dark",
+                xaxis_title=y_label,
+                yaxis_title="Liczba dni",
+                bargap=0.05,
+            )
+            st.plotly_chart(hist_fig, width="stretch")

@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 from finance_analyzer.loader import load_transactions
 from finance_analyzer.cleaner import clean_transactions
@@ -20,6 +21,7 @@ from finance_analyzer.visuals import (
     plot_monthly_income_expense,
     plot_monthly_expenses_by_category,
     plot_top_expenses,
+    detailed_time_series_analysis,
 )
 from finance_analyzer.recurring import find_recurring_transactions, _normalize_description
 
@@ -41,33 +43,62 @@ warnings.filterwarnings(
 
 
 # ---------- HELPER: pipeline ----------
-
 def read_uploaded_csv(uploaded_file) -> pd.DataFrame:
     """
     Robust reader for Streamlit UploadedFile.
-    Tries multiple encodings commonly used in PL bank exports.
+    - próbuje kilka kodowań
+    - zakłada separator ';' (typowe dla PL banków)
+    - parsuje kolumny 'Data ...' jako datetime (dayfirst)
     """
     raw = uploaded_file.read()  # bytes
 
-    # Try several encodings
-    encodings_to_try = ["utf-8-sig", "cp1250", "iso-8859-2", "latin1"]
+    # Kolejność: najpierw cp1250 (większość PL banków), potem reszta
+    encodings_to_try = ["cp1250", "utf-8-sig", "iso-8859-2", "latin1"]
 
     last_error = None
     for enc in encodings_to_try:
         try:
-            buffer = io.StringIO(raw.decode(enc))
-            df = pd.read_csv(buffer, sep=None, engine="python")
-            st.info(f"Successfully loaded with encoding: {enc}")
-            return df
+            text = raw.decode(enc)
         except UnicodeDecodeError as e:
             last_error = e
             continue
+
+        buffer = io.StringIO(text)
+
+        try:
+            df = pd.read_csv(
+                buffer,
+                sep=";",          # w Twoim pliku jest ';'
+                engine="python",
+                decimal=",",      # 975,91 -> 975.91
+                thousands=" "
+            )
         except Exception as e:
             last_error = e
             continue
 
-    raise RuntimeError(f"Could not decode CSV with tried encodings: {encodings_to_try}. Last error: {last_error}")
+        # Oczyszczenie nazw kolumn
+        df.columns = [c.strip() for c in df.columns]
 
+        # Parsowanie kolumn z datami
+        for col in df.columns:
+            if col.lower().startswith("data "):
+                df[col] = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
+
+        # (opcjonalnie) utwórz standardową kolumnę 'date'
+        if "Data księgowania" in df.columns:
+            df["date"] = df["Data księgowania"]
+        elif "Data ksiêgowania" in df.columns:  # jeśli wyszły krzaki, ale nadal chcesz użyć
+            df["date"] = df["Data ksiêgowania"]
+        elif "Data transakcji" in df.columns:
+            df["date"] = df["Data transakcji"]
+
+        st.info(f"Successfully loaded with encoding: {enc}")
+        return df
+
+    raise RuntimeError(
+        f"Could not decode CSV with tried encodings: {encodings_to_try}. Last error: {last_error}"
+    )
 
 def run_pipeline_from_df(
     df_raw: pd.DataFrame,
@@ -93,12 +124,14 @@ def run_pipeline_from_file(
     uploaded_file is a Streamlit UploadedFile or None.
     """
     if uploaded_file is None:
-        return None
+        return None # type: ignore
 
     df_raw = read_uploaded_csv(uploaded_file)
     df_cat = run_pipeline_from_df(df_raw, rules_path, overrides_path)
     return df_cat
 
+
+# ---------- STREAMLIT APP ----------
 def show_cashflow_forecast_tab(df: pd.DataFrame):
     st.header("Forcast of monthly cashflow")
 
@@ -119,27 +152,12 @@ def show_cashflow_forecast_tab(df: pd.DataFrame):
         min_history=min_history,
     )
 
+    # Oznacz dane jako history/forecast
     hist_plot = monthly.assign(kind="history")
     fc_plot = forecast.assign(kind="forecast")
 
     frames = [hist_plot, fc_plot]
-
-# Remove empty frames
-    clean_frames = []
-    for f in frames:
-        if f is None:
-            continue
-        if f.empty:
-            continue
-    # if all columns are NA
-        if f.dropna(how="all").empty:
-            continue
-        clean_frames.append(f)
-
-    if clean_frames:
-        combined = pd.concat(clean_frames, ignore_index=True)
-    else:
-        combined = pd.DataFrame(columns=["month", "income", "expense", "net", "kind"])
+    combined = pd.concat(frames, ignore_index=True)
 
     # 4. plot - net cashflow
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -152,7 +170,7 @@ def show_cashflow_forecast_tab(df: pd.DataFrame):
         label="History",
     )
 
-    # history (half-transparent)
+    # forecast (lekko przeźroczysty)
     ax.bar(
         fc_plot["month"],
         fc_plot["net"],
@@ -165,8 +183,6 @@ def show_cashflow_forecast_tab(df: pd.DataFrame):
     ax.set_title("Monthly net cashflow (history + forecast)")
     ax.set_xlabel("Month")
     ax.set_ylabel("Net amount")
-
-    ax.legend()
 
     # dark-mode
     fig.patch.set_facecolor("#0e1117")
@@ -185,12 +201,10 @@ def show_cashflow_forecast_tab(df: pd.DataFrame):
 
     st.subheader("Monthly data (historical + forecast)")
     st.dataframe(
-    combined[["month", "income", "expense", "net", "kind"]]
-    .sort_values("month")
-    .reset_index(drop=True)
+        combined[["month", "income", "expense", "net", "kind"]]
+        .sort_values("month")
+        .reset_index(drop=True)
     )
-
-# ---------- STREAMLIT APP ----------
 
 def main():
     st.set_page_config(
@@ -330,8 +344,8 @@ def main():
         )
 
     # --- TABS ---
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Summary", "Category", "Plots", "Forecast cashflow"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Summary", "Category", "Plots", "Forecast cashflow", "Detailed analysis"]
     )
 
     with tab1:
@@ -347,10 +361,10 @@ def main():
 
     with tab3:
         st.markdown("Visualizations")
-        st.subheader("Wykresy")
+        st.subheader("Plots")
 
         if df_view.empty:
-            st.info("Brak danych do wykresów – zmień filtry u góry.")
+            st.info("No data available for plotting.")
         else:
             # 1) Monthly income / expense
             fig1, _ = plot_monthly_income_expense(summary)
@@ -367,6 +381,14 @@ def main():
     with tab4:
         # NOWA ZAKŁADKA — prognoza cashflow
         show_cashflow_forecast_tab(df_view)
+    
+    with tab5:
+        st.markdown("## 📊 Detailed time series analysis")
+
+        if df_view.empty:
+            st.info("No data available for detailed analysis.")
+        else:
+            detailed_time_series_analysis(df_view)
 
     # --- RECURRING PAYMENTS ---
     st.subheader("Recurring payments (subscriptions, rent, etc.)")
