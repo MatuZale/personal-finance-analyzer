@@ -10,18 +10,22 @@ import numpy as np
 
 from finance_analyzer.loader import load_transactions
 from finance_analyzer.cleaner import clean_transactions
+from finance_analyzer.ml_suggester import train_category_suggester, suggest_category_for_single
 from finance_analyzer.analytics import (
     monthly_income_expense,
     monthly_category_breakdown,
     top_expenses,
     compute_monthly_cashflow,
     forecast_cashflow_seasonal,
+    prepare_spending_heatmaps,
 )
 from finance_analyzer.visuals import (
     plot_monthly_income_expense,
     plot_monthly_expenses_by_category,
     plot_top_expenses,
     detailed_time_series_analysis,
+    plot_dow_month_heatmap,
+    plot_dom_month_heatmap,
 )
 from finance_analyzer.recurring import find_recurring_transactions, _normalize_description
 
@@ -157,7 +161,19 @@ def show_cashflow_forecast_tab(df: pd.DataFrame):
     fc_plot = forecast.assign(kind="forecast")
 
     frames = [hist_plot, fc_plot]
-    combined = pd.concat(frames, ignore_index=True)
+
+    # odfiltruj puste / all-NaN
+    valid_frames = [
+        f
+        for f in frames
+        if f is not None and not f.empty and not f.dropna(how="all").empty
+    ]
+
+    if valid_frames:
+        combined = pd.concat(valid_frames, ignore_index=True)
+    else:
+        combined = pd.DataFrame(columns=["month", "income", "expense", "net", "kind"])
+
 
     # 4. plot - net cashflow
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -283,6 +299,10 @@ def main():
 
     # ODTĄD ZAWSZE KORZYSTAMY Z ZAPISANEGO DF
     df_cat = st.session_state["df_cat"]
+    if "cat_suggester" not in st.session_state:
+        with st.spinner("Training category suggestion model..."):
+            sugg = train_category_suggester(df_cat)
+        st.session_state["cat_suggester"] = sugg
 
 
     # --- FILTERING ---
@@ -329,8 +349,6 @@ def main():
     col3.metric("Net", f"{net:,.2f}")
 
     # --- ANALYTICS ---
-
-        # --- ANALYTICS ---
     summary = monthly_income_expense(df_view)
     cat_pivot = monthly_category_breakdown(df_view)
     topn = top_expenses(df_view, n=top_n)
@@ -377,6 +395,27 @@ def main():
             # 3) Top N expenses
             fig3, _ = plot_top_expenses(topn)
             st.pyplot(fig3)
+
+            # 4) Heatmaps
+            from finance_analyzer.analytics import prepare_spending_heatmaps
+            heatmaps = prepare_spending_heatmaps(df_view)
+
+            if heatmaps:
+                st.subheader("Spending heatmaps")
+
+                pivot_dow = heatmaps.get("dow_month")
+                pivot_dom = heatmaps.get("dom_month")
+
+                if pivot_dow is not None and not pivot_dow.empty:
+                    fig_h1, _ = plot_dow_month_heatmap(pivot_dow)
+                    st.pyplot(fig_h1)
+
+                if pivot_dom is not None and not pivot_dom.empty:
+                    fig_h2, _ = plot_dom_month_heatmap(pivot_dom)
+                    st.pyplot(fig_h2)
+            else:
+                st.info("Not enough expense data to build heatmaps.")
+
 
     with tab4:
         # NOWA ZAKŁADKA — prognoza cashflow
@@ -514,6 +553,32 @@ def main():
                 ]
                 if not candidates.empty:
                     chosen_merchant = candidates.mode().iloc[0]
+            
+                    # --- ML suggestion (if model trained) ---
+        ml_sugg = st.session_state.get("cat_suggester", None)
+        suggested_cat_ml = None
+        suggested_conf_ml = None
+
+        if ml_sugg is not None:
+            vectorizer, model = ml_sugg
+            try:
+                pred, conf = suggest_category_for_single(
+                    description=chosen_desc,
+                    merchant=chosen_merchant,
+                    vectorizer=vectorizer,
+                    model=model,
+                )
+                suggested_cat_ml = pred
+                suggested_conf_ml = conf
+            except Exception:
+                pass
+
+        if suggested_cat_ml is not None:
+            st.caption(
+                f"ML suggestion: **{suggested_cat_ml}** "
+                f"(confidence ≈ {suggested_conf_ml:.0%})"
+            )
+
 
             # Suggested category based on previous data for this merchant
             suggested_cat = None
@@ -524,15 +589,20 @@ def main():
                     f"**{suggested_cat}**"
                 )
 
-            # Available categories from current data (except Uncategorized)
-            existing_cats = sorted(
-                [c for c in df_view["category"].dropna().unique() if c != "Uncategorized"]
-            )
+        # Available categories from current data (except Uncategorized)
+        existing_cats = sorted(
+            [c for c in df_view["category"].dropna().unique() if c != "Uncategorized"]
+        )
 
-            # Default dropdown index
-            default_index = 0  # "(none)"
-            if suggested_cat and suggested_cat in existing_cats:
-                default_index = 1 + existing_cats.index(suggested_cat)
+        # Default dropdown index
+        default_index = 0  # "(none)"
+        # 1) merchant-based suggestion
+        if suggested_cat and suggested_cat in existing_cats:
+            default_index = 1 + existing_cats.index(suggested_cat)
+        # 2) ML suggestion (if different) – prefer ML if brak merchant suggestion
+        elif suggested_cat_ml and suggested_cat_ml in existing_cats:
+            default_index = 1 + existing_cats.index(suggested_cat_ml)
+
 
             chosen_existing = st.selectbox(
                 "Assign existing category",

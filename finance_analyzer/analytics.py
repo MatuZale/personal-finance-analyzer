@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 import pandas as pd
+import numpy as np
 
 
 def compute_monthly_cashflow(df: pd.DataFrame) -> pd.DataFrame:
@@ -158,3 +159,51 @@ def top_expenses(df: pd.DataFrame, n=10) -> pd.DataFrame:
     expenses = df[df["amount"] < 0]
 
     return expenses.sort_values("amount").head(n)
+
+def prepare_spending_heatmaps(df: pd.DataFrame) -> dict:
+    """
+    Prepare pivot tables for spending heatmaps.
+    Returns dict with:
+      - 'dow_month': day-of-week vs month
+      - 'dom_month': day-of-month vs month
+    """
+    if "date" not in df.columns or "amount" not in df.columns:
+        return {}
+
+    # Only expenses (amount < 0)
+    df_exp = df[df["amount"] < 0].copy()
+    if df_exp.empty:
+        return {}
+
+    # Positive spending value
+    df_exp["spend"] = -df_exp["amount"]
+
+    # Day of week (0=Mon,...,6=Sun)
+    df_exp["dow"] = df_exp["date"].dt.dayofweek
+    # Day of month
+    df_exp["dom"] = df_exp["date"].dt.day
+    # Month as YYYY-MM string
+    df_exp["month_str"] = df_exp["date"].dt.to_period("M").astype(str)
+
+    # 1) DOW vs month
+    pivot_dow_month = df_exp.pivot_table(
+        index="dow",
+        columns="month_str",
+        values="spend",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+
+    # 2) Day-of-month vs month
+    pivot_dom_month = df_exp.pivot_table(
+        index="dom",
+        columns="month_str",
+        values="spend",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+
+    return {
+        "dow_month": pivot_dow_month,
+        "dom_month": pivot_dom_month,
+    }

@@ -524,3 +524,91 @@ def detailed_time_series_analysis(df: pd.DataFrame) -> None:
                 bargap=0.05,
             )
             st.plotly_chart(hist_fig, width="stretch")
+            
+def plot_dow_month_heatmap(pivot: pd.DataFrame):
+    """
+    Heatmap: day-of-week (rows) vs month (columns), values = total spending.
+    """
+    if pivot is None or pivot.empty:
+        return None, None
+
+    # Ensure rows ordered Mon..Sun
+    pivot = pivot.sort_index()
+
+    days_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    # Sometimes we may not have all 7 days in data
+    idx = pivot.index.to_list()
+    y_labels = [days_labels[i] for i in idx]
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    im = ax.imshow(pivot.values, aspect="auto", cmap="magma")
+
+    ax.set_yticks(np.arange(len(y_labels)))
+    ax.set_yticklabels(y_labels)
+
+    ax.set_xticks(np.arange(len(pivot.columns)))
+    ax.set_xticklabels(pivot.columns, rotation=45, ha="right")
+
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Day of week")
+    ax.set_title("Total spending by day of week and month")
+
+    # Colorbar
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Total spending")
+
+    # Dark mode styling
+    fig.patch.set_facecolor("#0e1117")
+    ax.set_facecolor("#0e1117")
+    for spine in ax.spines.values():
+        spine.set_color("white")
+    ax.tick_params(colors="white")
+    ax.xaxis.label.set_color("white")
+    ax.yaxis.label.set_color("white")
+    ax.title.set_color("white")
+    cbar.ax.yaxis.label.set_color("white")
+    cbar.ax.tick_params(colors="white")
+
+    return fig, ax
+
+
+def plot_dom_month_heatmap(pivot: pd.DataFrame):
+    """
+    Heatmap: day-of-month (rows) vs month (columns), values = total spending.
+    """
+    if pivot is None or pivot.empty:
+        return None, None
+
+    pivot = pivot.sort_index()
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    im = ax.imshow(pivot.values, aspect="auto", cmap="magma")
+
+    ax.set_yticks(np.arange(len(pivot.index)))
+    ax.set_yticklabels(pivot.index)
+
+    ax.set_xticks(np.arange(len(pivot.columns)))
+    ax.set_xticklabels(pivot.columns, rotation=45, ha="right")
+
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Day of month")
+    ax.set_title("Total spending by day of month and month")
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Total spending")
+
+    # Dark mode styling
+    fig.patch.set_facecolor("#0e1117")
+    ax.set_facecolor("#0e1117")
+    for spine in ax.spines.values():
+        spine.set_color("white")
+    ax.tick_params(colors="white")
+    ax.xaxis.label.set_color("white")
+    ax.yaxis.label.set_color("white")
+    ax.title.set_color("white")
+    cbar.ax.yaxis.label.set_color("white")
+    cbar.ax.tick_params(colors="white")
+
+    return fig, ax
